@@ -35,9 +35,9 @@ KNOWN_PATTERNS: list[dict] = [
         "match_patterns": ["baxia", "captcha", "punish"],
         "severity": "critical",
         "auto_recoverable": False,
-        "recovery_action": "switch_to_cloud_browser",
-        "description": "Captcha triggered — need cloud browser for this operation",
-        "hint": "RFQ posting requires cloud browser. Other ops use local headless.",
+        "recovery_action": "manual_verification",
+        "description": "Alibaba requested manual verification",
+        "hint": "Run 'ali login' and complete verification in the local browser.",
     },
     {
         "id": "rfq_ai_stuck",

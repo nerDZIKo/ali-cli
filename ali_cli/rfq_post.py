@@ -1,6 +1,6 @@
 """RFQ Posting — browser-automated flow for posting new RFQs on Alibaba.
 
-Flow (all via cloud browser, fully automated):
+Flow (via local Playwright):
   1. Upload file → filebroker.alibaba.com/x/upload
   2. Validate file → rfq.alibaba.com/rfq/rfq_annex_check_ajax.do
   3. Save file list → rfqposting.alibaba.com/rfq/ajax/multimodal/saveFileList.do
@@ -10,8 +10,7 @@ Flow (all via cloud browser, fully automated):
   7. Submit → "Post request" button
   8. Return RFQ ID from success page/redirect
 
-Note: This REQUIRES a cloud browser session because rfq.alibaba.com
-uses signed requests and React state that cannot be replicated via HTTP.
+Uses a local authenticated browser context for signed requests and React state.
 """
 
 import json
@@ -25,74 +24,17 @@ from ali_cli.errors import start_run, step, log_step, log_error
 
 
 def _do_inline_login(page, log):
-    """Perform OTP login on the current page without opening a new one.
-    
-    Navigates to the login page, does the OTP flow, then returns.
-    The caller should then seed cookies across domains.
-    """
-    import re as _re
-    from ali_cli.auth import get_gmail_service, get_fresh_otp, _paste_otp
-    from ali_cli.otp_watcher import read_latest_otp
-    from ali_cli.config import get_email
-
-    email = get_email()
-    page.goto("https://login.alibaba.com/newlogin/icbuLogin.htm",
-              wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(5000)
-
-    # Click "Sign in with a code"
-    page.click("button:has-text('Sign in with a code')", timeout=10000)
-    page.wait_for_timeout(2000)
-
-    # Fill email
-    page.locator("input[type='text']:visible").first.fill(email)
-    page.wait_for_timeout(500)
-
-    # Send code
-    send_ts = time.time()
-    page.click("button:has-text('Send code')", timeout=10000)
-    log("  OTP sent, waiting for code...")
-
-    # Get OTP
-    gmail = get_gmail_service()
-    otp = None
-    for i in range(15):
-        otp = read_latest_otp(max_age_seconds=90)
-        if otp and time.time() - send_ts > 5:
-            break
-        if i >= 2:
-            otp = get_fresh_otp(gmail, send_ts)
-            if otp:
-                break
-        time.sleep(5)
-
-    if not otp:
-        raise RuntimeError("No OTP received from Gmail")
-
-    log(f"  OTP received: {otp}")
-    _paste_otp(page, otp)
-    page.wait_for_timeout(1000)
-
-    try:
-        page.click("button:has-text('Sign in')", timeout=5000)
-    except Exception:
-        page.keyboard.press("Enter")
-
-    page.wait_for_timeout(15000)
-
-    if "login" in page.url.lower():
-        raise RuntimeError(f"Login failed — still on {page.url}")
-
-    log("  ✅ Login successful")
+    """Ask for explicit local login; never connect to a mailbox."""
+    raise RuntimeError("Session expired. Run 'ali login' in the local browser, then retry.")
 
 
 def post_rfq(cdp_url: str, subject: str, quantity: int = 0, unit: str = "pieces",
              attachment: str = None, description: str = None, auto_generate: bool = True,
              dry_run: bool = False, console=None):
-    """Post a new RFQ on Alibaba.com via cloud browser.
+    """Post a new RFQ on Alibaba.com via local Playwright.
 
     Args:
-        cdp_url: CDP URL for the cloud browser session.
+        cdp_url: Must be None; remote browsers are disabled.
         subject: RFQ subject/description text (sent to AI generation).
         quantity: Sourcing quantity (e.g. 10000).
         unit: Quantity unit (default: "pieces").
@@ -105,7 +47,7 @@ def post_rfq(cdp_url: str, subject: str, quantity: int = 0, unit: str = "pieces"
     Returns:
         dict with keys: success, rfq_id (if available), form_data, url
     """
-    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
     def log(msg):
         if console:
@@ -116,11 +58,13 @@ def post_rfq(cdp_url: str, subject: str, quantity: int = 0, unit: str = "pieces"
     run_id = start_run("post-rfq", {"subject": subject[:80], "quantity": quantity})
     result = {"success": False, "rfq_id": None, "form_data": {}, "url": "", "run_id": run_id}
 
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url)
-        context = browser.contexts[0]
+    from ali_cli.browser import BrowserManager
+    if cdp_url:
+        raise RuntimeError("Remote browsers are disabled in this installation.")
+    with BrowserManager(headless=False) as bm:
+        context = bm._context
 
-        # Inject our saved local session cookies into the cloud browser context.
+        # Load our saved local session cookies into the browser context.
         # state.json contains valid alibaba.com session cookies from ali login/keepalive.
         # These work on rfq.alibaba.com because they're scoped to .alibaba.com domain.
         from ali_cli.config import load_session
@@ -161,7 +105,7 @@ def post_rfq(cdp_url: str, subject: str, quantity: int = 0, unit: str = "pieces"
             return t.includes('My store') || t.includes('Buyer Central');
         }""")
         if not auth_ok:
-            log("  Cookies didn't auth — falling back to OTP login...")
+            log("  Session not authenticated — local login is required.")
             try:
                 _do_inline_login(page, log)
                 # Seed cookies across domains after OTP login

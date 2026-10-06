@@ -1,4 +1,4 @@
-"""Playwright browser management for Alibaba — local headless + cloud CDP.
+"""Playwright browser management for Alibaba — local Chromium.
 
 All data access goes through page.evaluate() to leverage the browser's
 cookie/CSRF/fingerprint context. Direct HTTP calls to Alibaba return 503.
@@ -28,6 +28,8 @@ class BrowserManager:
     """Manages a Playwright browser with session persistence."""
 
     def __init__(self, headless=True, timeout=30000, cdp_url=None):
+        if cdp_url:
+            raise RuntimeError("Remote browsers are disabled in this local installation.")
         self.headless = headless
         self.timeout = timeout
         self.cdp_url = cdp_url
@@ -46,23 +48,19 @@ class BrowserManager:
     def start(self):
         self._playwright = sync_playwright().start()
 
-        if self.cdp_url:
-            self._browser = self._playwright.chromium.connect_over_cdp(self.cdp_url)
-            self._context = self._browser.contexts[0]
-        else:
-            self._browser = self._playwright.chromium.launch(headless=self.headless)
-            viewport = {"width": 1440, "height": 1080}
-            session = load_session()
-            if session:
-                state = {k: v for k, v in session.items() if not k.startswith("_")}
-                try:
-                    self._context = self._browser.new_context(
-                        storage_state=state, viewport=viewport
-                    )
-                except Exception:
-                    self._context = self._browser.new_context(viewport=viewport)
-            else:
+        self._browser = self._playwright.chromium.launch(headless=self.headless)
+        viewport = {"width": 1440, "height": 1080}
+        session = load_session()
+        if session:
+            state = {k: v for k, v in session.items() if not k.startswith("_")}
+            try:
+                self._context = self._browser.new_context(
+                    storage_state=state, viewport=viewport
+                )
+            except Exception:
                 self._context = self._browser.new_context(viewport=viewport)
+        else:
+            self._context = self._browser.new_context(viewport=viewport)
 
         self._context.set_default_timeout(self.timeout)
         self._page = self._context.new_page()

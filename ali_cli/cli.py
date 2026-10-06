@@ -17,7 +17,6 @@ from ali_cli.config import (
     clear_session,
     session_exists,
     get_email,
-    get_browser_use_api_key,
     SESSION_FILE,
 )
 from ali_cli.errors import start_run, log_error, AliError
@@ -33,30 +32,14 @@ EXIT_INFRA_ERROR = 4
 
 
 def _get_browser(config=None, cdp_url=None):
-    """Create a BrowserManager, reusing active cloud browser session if available.
-    
-    Checks ~/.ali-cli/browser-session.json first. If a live session exists,
-    connects to it (no gateway config.patch needed). Otherwise falls back to
-    local headless browser with saved cookies.
-    """
+    """Use local Chromium and locally saved cookies."""
     from ali_cli.browser import BrowserManager
-    from ali_cli.session_manager import load_cloud_session as load_browser_session, _get_api_key, _check_session_alive
 
     if config is None:
         config = load_config()
 
-    # If explicit cdp_url passed, use it
     if cdp_url:
-        return BrowserManager(cdp_url=cdp_url)
-
-    # Try reusing active cloud browser session
-    saved = load_browser_session()
-    if saved:
-        api_key = _get_api_key()
-        sid = saved.get("session_id")
-        cdp = saved.get("cdp_url")
-        if sid and cdp and api_key and _check_session_alive(api_key, sid):
-            return BrowserManager(cdp_url=cdp)
+        raise RuntimeError("Remote browsers are disabled; use local Playwright.")
 
     # Fallback to local headless with saved cookies
     return BrowserManager(
@@ -106,11 +89,6 @@ def _handle_error(e: Exception, as_json: bool, command: str = ""):
     sys.exit(EXIT_ERROR)
 
 
-def _load_api_key():
-    """Load Browser Use API key from config, env, or ALI_CLI_HOME/.env."""
-    return get_browser_use_api_key()
-
-
 def _session_age():
     """Return human-readable session age, or None."""
     if not SESSION_FILE.exists():
@@ -136,16 +114,11 @@ def cli():
 
 @cli.command()
 @click.option("--email", default=None, help="Login email (overrides config)")
-def login(email):
-    """Log in to Alibaba.
-
-    Uses the Browser Use cloud browser to complete the OTP flow:
-      1. Starts (or reuses) a cloud browser with your configured profile
-      2. Visits alibaba.com to check for existing login cookies
-      3. If expired, fills email → requests OTP → fetches from Gmail → pastes
-      4. Saves cookies to ALI_CLI_HOME/state.json
-      5. Stops the cloud browser (stops billing)
-    """
+@click.option("--timeout", type=click.IntRange(10, 900), default=180, show_default=True,
+              help="Seconds allowed for manual verification.")
+@click.option("--manual", is_flag=True, help="Enter all credentials yourself in the local browser.")
+def login(email, timeout, manual):
+    """Log in locally using LOGIN/PASSWORD from the project .env. OTP is manual."""
     from ali_cli.session_manager import refresh_login
 
     config = load_config()
@@ -156,7 +129,7 @@ def login(email):
         sys.exit(EXIT_ERROR)
 
     try:
-        refresh_login(console)
+        refresh_login(console, email=email, timeout=timeout, manual=manual)
         # Persist the email we just used into config so future runs don't prompt
         if config.get("email") != email:
             config["email"] = email
@@ -883,55 +856,14 @@ def keepalive_cmd(as_json):
 @click.argument("action", type=click.Choice(["start", "stop", "status"]))
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 def browser_cmd(action, as_json):
-    """Manage cloud browser session (start/stop/status)."""
-    from ali_cli.session_manager import (
-        start_cloud_browser, stop_cloud_browser,
-        load_cloud_session, _get_api_key, _check_session_alive,
-        state_age_hours,
-    )
-
-    if action == "start":
-        try:
-            cdp_url, session_id = start_cloud_browser()
-            if as_json:
-                click.echo(json.dumps({"status": "active", "session_id": session_id, "cdp_url": cdp_url}))
-            else:
-                console.print(f"[green]✅ Cloud browser active[/green]")
-                console.print(f"  Session: {session_id[:12]}...")
-        except Exception as e:
-            if as_json:
-                click.echo(json.dumps({"status": "error", "error": str(e)}))
-            else:
-                console.print(f"[red]{e}[/red]")
-            sys.exit(1)
-
-    elif action == "stop":
-        stop_cloud_browser()
-        if as_json:
-            click.echo(json.dumps({"status": "stopped"}))
-        else:
-            console.print("[green]Cloud browser stopped.[/green]")
-
-    elif action == "status":
-        age = state_age_hours()
-        saved = load_cloud_session()
-        alive = False
-        if saved:
-            api_key = _get_api_key()
-            alive = _check_session_alive(api_key, saved.get("session_id", "")) if api_key else False
-
-        if as_json:
-            click.echo(json.dumps({
-                "cookie_age_hours": round(age, 2) if age is not None else None,
-                "cloud_browser_active": alive,
-                "session_id": saved.get("session_id") if saved else None,
-            }))
-        else:
-            if age is not None:
-                console.print(f"  Cookie age: {age:.1f} hours {'[green](fresh)[/green]' if age < 20 else '[yellow](getting old)[/yellow]' if age < 24 else '[red](likely expired)[/red]'}")
-            else:
-                console.print("  [yellow]No saved cookies[/yellow]")
-            console.print(f"  Cloud browser: {'[green]active[/green]' if alive else '[dim]stopped[/dim]'}")
+    """Show local browser mode. Windows are managed by each command."""
+    from ali_cli.session_manager import state_age_hours
+    result = {"mode": "local", "cookie_age_hours": state_age_hours(),
+              "message": "Use 'ali login' to open a login window. Each command closes its own browser."}
+    if as_json:
+        click.echo(json.dumps(result))
+    else:
+        console.print(result["message"])
 
 
 # ── Post RFQ ─────────────────────────────────────────────────────────
@@ -948,7 +880,7 @@ def browser_cmd(action, as_json):
 def post_rfq_cmd(subject, quantity, unit, attach, description, no_ai, dry_run, as_json):
     """Post a new RFQ on Alibaba.com.
 
-    Requires a cloud browser session (auto-started). The flow:
+    Uses local Playwright and the saved session. The flow:
     1. Upload attachment (if provided)
     2. Fill subject text → Alibaba AI generates detailed RFQ
     3. Fill quantity and submit
@@ -957,24 +889,11 @@ def post_rfq_cmd(subject, quantity, unit, attach, description, no_ai, dry_run, a
         ali post-rfq --subject "Stand-up pouches with zipper, matte, 4oz" \\
             --quantity 10000 --attach ~/rfq.xlsx
     """
-    from ali_cli.session_manager import ensure_browser_session, ensure_logged_in_browser, stop_cloud_browser
     from ali_cli.rfq_post import post_rfq
 
     try:
-        console.print("Starting cloud browser...", style="bold")
-        cdp_url, session_id = ensure_browser_session(timeout_min=30)
-        console.print(f"  Session: {session_id[:12]}...")
-
-        # Ensure we're logged in
-        console.print("  Checking login state...")
-        try:
-            bm = ensure_logged_in_browser(cdp_url, target_url="https://rfq.alibaba.com/rfq/profession.htm")
-            bm.close()
-        except Exception:
-            console.print("  [yellow]Login check failed — proceeding anyway[/yellow]")
-
         result = post_rfq(
-            cdp_url=cdp_url,
+            cdp_url=None,
             subject=subject,
             quantity=quantity,
             unit=unit,
@@ -1355,32 +1274,23 @@ def report_cmd(skill, report_status, steps_ok, steps_failed, duration, issues, i
 
 @cli.command("otp-watch")
 def otp_watch():
-    """Start OTP watcher — polls Gmail and writes codes to ~/.ali-cli/latest-otp.txt."""
-    from ali_cli.otp_watcher import main as watcher_main
-    watcher_main()
+    """Explain manual OTP entry (no mailbox connection)."""
+    console.print("Enter codes manually in the 'ali login' browser. Mailbox access is disabled.")
 
-
-# ── Logout ───────────────────────────────────────────────────────────
 
 @cli.command()
-@click.option("--keep-browser", is_flag=True, help="Keep cloud browser alive (only clear cookies).")
+@click.option("--keep-browser", is_flag=True, hidden=True)
 def logout(keep_browser):
-    """Clear saved session, cookies, and stop cloud browser."""
-    from ali_cli.session_manager import stop_browser_session as stop_cloud
-    
+    """Clear the locally saved session and cookies."""
     clear_session()
-    if not keep_browser:
-        stop_cloud()
-        console.print("[green]Session + cloud browser stopped.[/green]")
-    else:
-        console.print("[green]Session cleared (browser still alive).[/green]")
+    console.print("[green]Local session cleared.[/green]")
 
 
 # ── Config management ────────────────────────────────────────────────
 
 @cli.group()
 def config():
-    """View or update ali-cli config (~/.ali-cli/config.json)."""
+    """View or update project-local ali-cli configuration."""
     pass
 
 
@@ -1402,26 +1312,6 @@ def config_set_email(email):
     cfg["email"] = email
     save_config(cfg)
     console.print(f"[green]Email set to {email}[/green]")
-
-
-@config.command("set-profile-id")
-@click.argument("profile_id")
-def config_set_profile_id(profile_id):
-    """Set the Browser Use profile ID used for the login browser."""
-    cfg = load_config()
-    cfg["browser_use_profile_id"] = profile_id
-    save_config(cfg)
-    console.print(f"[green]Browser Use profile ID set.[/green]")
-
-
-@config.command("set-api-key")
-@click.argument("api_key")
-def config_set_api_key(api_key):
-    """Set the Browser Use API key."""
-    cfg = load_config()
-    cfg["browser_use_api_key"] = api_key
-    save_config(cfg)
-    console.print(f"[green]Browser Use API key set.[/green]")
 
 
 @config.command("path")

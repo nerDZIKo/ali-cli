@@ -1,30 +1,25 @@
-"""Configuration and session management for Ali CLI.
-
-All state lives under ALI_CLI_HOME (default: ~/.ali-cli/).
-
-Layout:
-  ~/.ali-cli/
-    ├── config.json                   # User config (email, profile ID, timeouts)
-    ├── .env                          # Optional: BROWSER_USE_API_KEY=...
-    ├── state.json                    # Playwright storage_state (cookies + localStorage)
-    ├── session.json                  # Legacy alias for state.json
-    ├── cookies.json                  # Raw cookie list
-    ├── browser-session.json          # Active Browser Use cloud session (if any)
-    ├── login-status.json             # Last login timestamp + result
-    ├── latest-otp.txt                # OTP code captured by otp_watcher
-    └── secrets/
-        ├── gmail-oauth-credentials.json  # Google Cloud OAuth client
-        └── gmail-tokens.json             # Gmail refresh/access tokens
-"""
+"""Project-local configuration and saved Playwright sessions."""
 
 import json
 import os
 from pathlib import Path
+from dotenv import dotenv_values
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def local_credentials():
+    """Read credentials without interpolation, logging, or changing the environment."""
+    values = dotenv_values(PROJECT_ROOT / ".env", interpolate=False)
+    return (
+        os.environ.get("LOGIN") or values.get("LOGIN") or "",
+        os.environ.get("PASSWORD") or values.get("PASSWORD") or "",
+    )
 
 
 def get_home() -> Path:
     """Return the Ali CLI config root. Respects ALI_CLI_HOME env var."""
-    return Path(os.environ.get("ALI_CLI_HOME", Path.home() / ".ali-cli"))
+    return Path(os.environ.get("ALI_CLI_HOME", PROJECT_ROOT / ".ali-cli"))
 
 
 CONFIG_DIR = get_home()
@@ -34,20 +29,16 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 # two different names; unified here so every path reads/writes the same file.
 SESSION_FILE = CONFIG_DIR / "state.json"
 COOKIES_FILE = CONFIG_DIR / "cookies.json"
-SECRETS_DIR = CONFIG_DIR / "secrets"
-ENV_FILE = CONFIG_DIR / ".env"
 
 DEFAULT_CONFIG = {
     "email": "",
     "headless": True,
     "timeout": 30000,
-    "browser_use_api_key": "",
-    "browser_use_profile_id": "",
 }
 
 
 def ensure_config_dir():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
 
 def load_config():
@@ -69,52 +60,19 @@ def save_config(config):
 def get_email(cli_override: str | None = None) -> str:
     """Resolve the Alibaba login email.
 
-    Priority: CLI --email arg > config.json > ALI_EMAIL env var.
+    Priority: CLI --email > ALI_EMAIL > LOGIN from environment/.env > config.json.
     Raises RuntimeError if no email is configured.
     """
     if cli_override:
         return cli_override
     config = load_config()
-    email = config.get("email") or os.environ.get("ALI_EMAIL", "")
+    email = os.environ.get("ALI_EMAIL") or local_credentials()[0] or config.get("email")
     if not email:
         raise RuntimeError(
             "No Alibaba login email configured. "
             "Run `ali config set-email you@example.com` or pass `--email`."
         )
     return email
-
-
-def get_browser_use_api_key() -> str:
-    """Load Browser Use API key from config, env, or ALI_CLI_HOME/.env."""
-    config = load_config()
-    api_key = config.get("browser_use_api_key", "")
-    if api_key:
-        return api_key
-    api_key = os.environ.get("BROWSER_USE_API_KEY", "")
-    if api_key:
-        return api_key
-    if ENV_FILE.exists():
-        with open(ENV_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("BROWSER_USE_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
-
-
-def get_browser_use_profile_id() -> str:
-    """Load Browser Use profile ID from config or env. Required for login."""
-    config = load_config()
-    profile_id = config.get("browser_use_profile_id", "")
-    if profile_id:
-        return profile_id
-    return os.environ.get("BROWSER_USE_PROFILE_ID", "")
-
-
-def get_secrets_dir() -> Path:
-    """Return secrets directory (ALI_CLI_HOME/secrets/). Creates it if missing."""
-    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    return SECRETS_DIR
 
 
 def save_session(storage_state):
